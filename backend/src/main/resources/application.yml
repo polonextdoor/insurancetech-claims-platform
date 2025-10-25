@@ -80,6 +80,12 @@ app:
     score-threshold: 75.0
     auto-flag-threshold: 90.0
 
+  # ML Service Configuration
+  ml-service:
+    url: ${ML_SERVICE_URL:http://localhost:8000}
+    timeout-seconds: 30
+    enabled: ${ML_SERVICE_ENABLED:true}
+
 # Logging Configuration
 logging:
   level:

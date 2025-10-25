@@ -3,16 +3,20 @@ package com.insurancetech.service;
 import com.insurancetech.dto.ClaimResponse;
 import com.insurancetech.dto.CreateClaimRequest;
 import com.insurancetech.dto.UpdateClaimStatusRequest;
+import com.insurancetech.dto.ml.MLRiskAssessment;
 import com.insurancetech.model.Claim;
 import com.insurancetech.model.Policy;
 import com.insurancetech.model.User;
 import com.insurancetech.repository.ClaimRepository;
 import com.insurancetech.repository.PolicyRepository;
 import com.insurancetech.repository.UserRepository;
+import org.slf4j.Logger; 
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
@@ -25,6 +29,8 @@ import java.util.stream.Collectors;
 @Service
 public class ClaimService {
 
+    private static final Logger logger = LoggerFactory.getLogger(ClaimService.class);
+
     @Autowired
     private ClaimRepository claimRepository;
 
@@ -34,8 +40,33 @@ public class ClaimService {
     @Autowired
     private UserRepository userRepository;
 
+    @Autowired
+    private MLRiskAssessmentService mlRiskAssessmentService;
+
     /**
-     * Create a new claim
+     * Create a new claim with ML-based risk assessment
+ * 
+ * ARCHITECTURE NOTE:
+ * This implementation uses synchronous ML assessment for simplicity and 
+ * portfolio demonstration purposes. In a production environment at scale
+ * this would use an event-driven 
+ * architecture with message queues (Kafka/RabbitMQ):
+ * 
+ * Production Flow:
+ * 1. Create claim with SUBMITTED status (immediate response)
+ * 2. Publish ClaimCreatedEvent to message broker
+ * 3. Background worker consumes event and processes ML assessment
+ * 4. Claim status updated to UNDER_REVIEW when assessment completes
+ * 5. Notifications sent to adjusters/customers
+ * 
+ * Benefits of async approach:
+ * - Sub-second claim submission response time
+ * - Horizontal scaling of ML assessment workers
+ * - System resilience (claims accepted even if ML service temporarily down)
+ * - Better resource utilization and throughput
+ * 
+ * This synchronous approach demonstrates the same business logic while
+ * being simpler to test, debug, and demonstrate in interviews.
      */
     @Transactional
     public ClaimResponse createClaim(CreateClaimRequest request, Long userId) {
@@ -56,6 +87,17 @@ public class ClaimService {
         User user = userRepository.findById(userId)
             .orElseThrow(() -> new RuntimeException("User not found"));
 
+        // NEW: Get customer's claim history
+        int customerClaimsCount = (int) claimRepository.countByUserId(userId);
+
+        // Call ML service BEFORE creating claim (optimistic approach)
+        logger.info("Requesting ML risk assessment for new claim on policy {}", 
+                policy.getPolicyNumber());
+
+        MLRiskAssessment mlAssessment = mlRiskAssessmentService.assessClaimRisk(
+                request, policy, customerClaimsCount
+        );
+
         // Create claim
         Claim claim = new Claim();
         claim.setClaimNumber(generateClaimNumber());
@@ -70,11 +112,26 @@ public class ClaimService {
         claim.setReportedDate(LocalDateTime.now());
         claim.setSubmittedAt(LocalDateTime.now());
 
-        // Calculate initial risk score
-        calculateRiskScore(claim);
+        // Apply ML assessment results
+        if (mlAssessment != null) {
+            claim.setRiskScore(mlAssessment.getRiskScore());
+            claim.setRiskLevel(Claim.RiskLevel.valueOf(mlAssessment.getRiskLevel()));
+            claim.setFraudScore(BigDecimal.valueOf(mlAssessment.getFraudProbability()));
+            claim.setFraudFlag(mlAssessment.getFraudProbability() >= 0.7);
+        
+            logger.info("ML assessment applied: {} (score: {})", 
+                claim.getRiskLevel(), claim.getRiskScore());
+        } else {
+            // Fallback to rule-based calculation if ML service unavailable
+            mlRiskAssessmentService.calculateFallbackRisk(claim, policy);
+            logger.warn("ML service unavailable, using fallback risk calculation");
+        }
 
         // Save claim
         claim = claimRepository.save(claim);
+
+        logger.info("Claim {} created successfully with risk level: {}", 
+            claim.getClaimNumber(), claim.getRiskLevel());
 
         return ClaimResponse.fromClaim(claim);
     }
