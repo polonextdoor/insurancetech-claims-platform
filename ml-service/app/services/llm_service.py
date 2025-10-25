@@ -11,7 +11,7 @@ class LLMService:
         if not api_key:
             raise ValueError("OPENAI_API_KEY not found in environment")
         self.client = OpenAI(api_key=api_key)
-        self.model = "gpt-3.5-turbo"  # Cheap and fast (~$0.002 per analysis)
+        self.model = "gpt-3.5-turbo"  
         
     async def analyze_claim_description(self, description: str, claim_amount: float, 
                                        policy_type: str) -> Dict:
